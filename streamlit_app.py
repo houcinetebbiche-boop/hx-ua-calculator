@@ -5,7 +5,7 @@ from CoolProp.CoolProp import PropsSI
 
 
 # ============================================================
-# PAGE CONFIGURATION
+# PAGE
 # ============================================================
 
 st.set_page_config(
@@ -17,13 +17,13 @@ st.set_page_config(
 st.title("🔥 Heat Exchanger UA Calculator")
 
 st.caption(
-    "CoolProp thermodynamic properties · Nine equal-duty WTD "
-    "segments · Pressures entered as absolute bar(a)"
+    "Enthalpies and temperature profiles are calculated with CoolProp. "
+    "Pressure inputs must be absolute, bar(a)."
 )
 
 
 # ============================================================
-# FLUID DATABASE
+# DATABASES
 # ============================================================
 
 FLUIDS = {
@@ -39,7 +39,7 @@ FLUIDS = {
     "Methane": "Methane",
     "Ethane": "Ethane",
     "Propane": "Propane",
-    "Butane": "n-Butane",
+    "n-Butane": "n-Butane",
     "Nitrogen": "Nitrogen",
     "Oxygen": "Oxygen",
     "Hydrogen": "Hydrogen",
@@ -59,7 +59,7 @@ NATURAL_GAS_COMPOSITION = {
     "Carbon dioxide": 1.0,
 }
 
-FLOW_UNITS = {
+FLOW_FACTORS_TO_KG_S = {
     "kg/s": 1.0,
     "kg/h": 1.0 / 3600.0,
     "t/h": 1000.0 / 3600.0,
@@ -72,28 +72,15 @@ NUMBER_OF_SEGMENTS = 9
 # BASIC CONVERSIONS
 # ============================================================
 
-def parse_optional_number(value):
-    """
-    Convert a text field to float.
-    Empty text returns None.
-    """
-    cleaned = str(value).strip()
-
-    if cleaned == "":
-        return None
-
-    return float(cleaned.replace(",", "."))
+def flow_to_kg_s(value, unit):
+    return value * FLOW_FACTORS_TO_KG_S[unit]
 
 
-def mass_flow_to_kg_s(value, unit):
-    return value * FLOW_UNITS[unit]
+def flow_from_kg_s(value, unit):
+    return value / FLOW_FACTORS_TO_KG_S[unit]
 
 
-def mass_flow_from_kg_s(value, unit):
-    return value / FLOW_UNITS[unit]
-
-
-def temperature_c_to_k(temperature_c):
+def temperature_to_k(temperature_c):
     temperature_k = temperature_c + 273.15
 
     if temperature_k <= 0:
@@ -104,7 +91,7 @@ def temperature_c_to_k(temperature_c):
     return temperature_k
 
 
-def pressure_bar_to_pa(pressure_bara):
+def pressure_to_pa(pressure_bara):
     if pressure_bara <= 0:
         raise ValueError(
             "Absolute pressure must be greater than zero."
@@ -113,21 +100,27 @@ def pressure_bar_to_pa(pressure_bara):
     return pressure_bara * 100_000.0
 
 
+def parse_required(value, field_name):
+    text = str(value).strip()
+
+    if text == "":
+        raise ValueError(f"{field_name} cannot be empty.")
+
+    return float(text)
+
+
 # ============================================================
 # COOLPROP FUNCTIONS
 # ============================================================
 
 @st.cache_data(show_spinner=False)
 def enthalpy_kj_kg(fluid, temperature_c, pressure_bara):
-    """
-    Specific enthalpy in kJ/kg.
-    """
     result = PropsSI(
         "Hmass",
         "T",
-        temperature_c_to_k(temperature_c),
+        temperature_to_k(temperature_c),
         "P",
-        pressure_bar_to_pa(pressure_bara),
+        pressure_to_pa(pressure_bara),
         fluid,
     )
 
@@ -139,171 +132,532 @@ def enthalpy_kj_kg(fluid, temperature_c, pressure_bara):
     return result / 1000.0
 
 
+@st.cache_data(show_spinner=False)
 def temperature_from_enthalpy(
     fluid,
-    enthalpy_target_kj_kg,
+    enthalpy_kj_kg_value,
     pressure_bara,
-    suggested_min_c=-200.0,
-    suggested_max_c=800.0,
 ):
-    """
-    Calculate temperature from enthalpy and pressure.
-
-    A direct CoolProp H-P flash is attempted first.
-    A numerical temperature search is used as a fallback,
-    particularly for mixtures.
-    """
-    pressure_pa = pressure_bar_to_pa(pressure_bara)
-    enthalpy_target_j_kg = enthalpy_target_kj_kg * 1000.0
-
-    try:
-        temperature_k = PropsSI(
-            "T",
-            "Hmass",
-            enthalpy_target_j_kg,
-            "P",
-            pressure_pa,
-            fluid,
-        )
-
-        temperature_c = temperature_k - 273.15
-
-        if math.isfinite(temperature_c):
-            return temperature_c
-
-    except Exception:
-        pass
-
-    # Fallback search for mixtures or unsupported H-P flashes
-    lower_limit = max(-272.0, suggested_min_c)
-    upper_limit = suggested_max_c
-
-    valid_points = []
-    number_of_scan_points = 500
-
-    for index in range(number_of_scan_points + 1):
-        fraction = index / number_of_scan_points
-
-        temperature_c = (
-            lower_limit
-            + fraction * (upper_limit - lower_limit)
-        )
-
-        try:
-            calculated_h = enthalpy_kj_kg(
-                fluid,
-                temperature_c,
-                pressure_bara,
-            )
-
-            difference = (
-                calculated_h - enthalpy_target_kj_kg
-            )
-
-            if math.isfinite(difference):
-                valid_points.append(
-                    (temperature_c, difference)
-                )
-
-        except Exception:
-            continue
-
-    for index in range(len(valid_points) - 1):
-        t_low, f_low = valid_points[index]
-        t_high, f_high = valid_points[index + 1]
-
-        if abs(f_low) < 1e-9:
-            return t_low
-
-        if f_low * f_high <= 0:
-            for _ in range(80):
-                t_middle = (t_low + t_high) / 2.0
-
-                h_middle = enthalpy_kj_kg(
-                    fluid,
-                    t_middle,
-                    pressure_bara,
-                )
-
-                f_middle = (
-                    h_middle - enthalpy_target_kj_kg
-                )
-
-                if abs(f_middle) < 1e-8:
-                    return t_middle
-
-                if f_low * f_middle <= 0:
-                    t_high = t_middle
-                    f_high = f_middle
-                else:
-                    t_low = t_middle
-                    f_low = f_middle
-
-            return (t_low + t_high) / 2.0
-
-    raise ValueError(
-        "Could not determine temperature from enthalpy "
-        "and pressure. Check the fluid state and CoolProp range."
+    result = PropsSI(
+        "T",
+        "Hmass",
+        enthalpy_kj_kg_value * 1000.0,
+        "P",
+        pressure_to_pa(pressure_bara),
+        fluid,
     )
+
+    if not math.isfinite(result):
+        raise ValueError(
+            "CoolProp returned an invalid temperature."
+        )
+
+    return result - 273.15
 
 
 # ============================================================
 # TEMPERATURE-DIFFERENCE FUNCTIONS
 # ============================================================
 
-def logarithmic_mean_temperature_difference(dt_1, dt_2):
-    """
-    LMTD = (dt1 - dt2) / ln(dt1 / dt2)
-    """
-    if dt_1 <= 0 or dt_2 <= 0:
+def logarithmic_mean_temperature_difference(dt1, dt2):
+    if dt1 <= 0 or dt2 <= 0:
         raise ValueError(
-            "Zero or negative temperature approach detected."
+            "Zero or negative temperature difference detected."
         )
 
     if math.isclose(
-        dt_1,
-        dt_2,
+        dt1,
+        dt2,
         rel_tol=1e-10,
         abs_tol=1e-12,
     ):
-        return dt_1
+        return dt1
 
-    return (
-        (dt_1 - dt_2)
-        / math.log(dt_1 / dt_2)
-    )
+    return (dt1 - dt2) / math.log(dt1 / dt2)
+
+
+def calculate_balance_error(q_hot, q_cold):
+    denominator = max(abs(q_hot), abs(q_cold))
+
+    if denominator == 0:
+        return 0.0
+
+    return abs(q_hot - q_cold) / denominator * 100.0
+
+
+# ============================================================
+# AUTOMATIC HEAT-BALANCE CALLBACK
+# ============================================================
+
+def automatically_balance():
+    """
+    Called when the user clicks Balance and calculate.
+
+    Exactly one of these Streamlit fields must be empty:
+    hot_flow_text, hot_tout_text,
+    cold_flow_text, cold_tout_text.
+    """
+
+    st.session_state.balance_error_message = ""
+    st.session_state.balance_success_message = ""
+
+    balance_fields = {
+        "hot_flow_text": st.session_state.hot_flow_text,
+        "hot_tout_text": st.session_state.hot_tout_text,
+        "cold_flow_text": st.session_state.cold_flow_text,
+        "cold_tout_text": st.session_state.cold_tout_text,
+    }
+
+    empty_fields = [
+        key
+        for key, value in balance_fields.items()
+        if str(value).strip() == ""
+    ]
+
+    if len(empty_fields) != 1:
+        st.session_state.balance_error_message = (
+            "Leave exactly one field empty: hot mass flow, "
+            "hot outlet temperature, cold mass flow, "
+            "or cold outlet temperature."
+        )
+        return
+
+    missing = empty_fields[0]
+
+    try:
+        hot_fluid = FLUIDS[st.session_state.hot_fluid]
+        cold_fluid = FLUIDS[st.session_state.cold_fluid]
+
+        hot_tin = float(st.session_state.hot_tin)
+        cold_tin = float(st.session_state.cold_tin)
+
+        hot_pin = float(st.session_state.hot_pin)
+        hot_pout = float(st.session_state.hot_pout)
+        cold_pin = float(st.session_state.cold_pin)
+        cold_pout = float(st.session_state.cold_pout)
+
+        # ----------------------------------------------------
+        # Solve missing hot-side flow
+        # ----------------------------------------------------
+
+        if missing == "hot_flow_text":
+            hot_tout = parse_required(
+                st.session_state.hot_tout_text,
+                "Hot outlet temperature",
+            )
+
+            cold_flow = flow_to_kg_s(
+                parse_required(
+                    st.session_state.cold_flow_text,
+                    "Cold mass flow",
+                ),
+                st.session_state.cold_flow_unit,
+            )
+
+            cold_tout = parse_required(
+                st.session_state.cold_tout_text,
+                "Cold outlet temperature",
+            )
+
+            h_cold_in = enthalpy_kj_kg(
+                cold_fluid,
+                cold_tin,
+                cold_pin,
+            )
+
+            h_cold_out = enthalpy_kj_kg(
+                cold_fluid,
+                cold_tout,
+                cold_pout,
+            )
+
+            duty = cold_flow * (h_cold_out - h_cold_in)
+
+            h_hot_in = enthalpy_kj_kg(
+                hot_fluid,
+                hot_tin,
+                hot_pin,
+            )
+
+            h_hot_out = enthalpy_kj_kg(
+                hot_fluid,
+                hot_tout,
+                hot_pout,
+            )
+
+            hot_delta_h = h_hot_in - h_hot_out
+
+            if duty <= 0 or hot_delta_h <= 0:
+                raise ValueError(
+                    "The entered temperatures do not produce "
+                    "a positive heat duty."
+                )
+
+            solved_kg_s = duty / hot_delta_h
+
+            solved_display = flow_from_kg_s(
+                solved_kg_s,
+                st.session_state.hot_flow_unit,
+            )
+
+            st.session_state.hot_flow_text = (
+                f"{solved_display:.8g}"
+            )
+
+            label = "Hot mass flow"
+            result = (
+                f"{solved_display:.6g} "
+                f"{st.session_state.hot_flow_unit}"
+            )
+
+        # ----------------------------------------------------
+        # Solve missing hot outlet temperature
+        # ----------------------------------------------------
+
+        elif missing == "hot_tout_text":
+            hot_flow = flow_to_kg_s(
+                parse_required(
+                    st.session_state.hot_flow_text,
+                    "Hot mass flow",
+                ),
+                st.session_state.hot_flow_unit,
+            )
+
+            cold_flow = flow_to_kg_s(
+                parse_required(
+                    st.session_state.cold_flow_text,
+                    "Cold mass flow",
+                ),
+                st.session_state.cold_flow_unit,
+            )
+
+            cold_tout = parse_required(
+                st.session_state.cold_tout_text,
+                "Cold outlet temperature",
+            )
+
+            h_cold_in = enthalpy_kj_kg(
+                cold_fluid,
+                cold_tin,
+                cold_pin,
+            )
+
+            h_cold_out = enthalpy_kj_kg(
+                cold_fluid,
+                cold_tout,
+                cold_pout,
+            )
+
+            duty = cold_flow * (h_cold_out - h_cold_in)
+
+            if hot_flow <= 0 or duty <= 0:
+                raise ValueError(
+                    "Mass flow and heat duty must be positive."
+                )
+
+            h_hot_in = enthalpy_kj_kg(
+                hot_fluid,
+                hot_tin,
+                hot_pin,
+            )
+
+            required_h_hot_out = (
+                h_hot_in - duty / hot_flow
+            )
+
+            solved_temperature = temperature_from_enthalpy(
+                hot_fluid,
+                required_h_hot_out,
+                hot_pout,
+            )
+
+            st.session_state.hot_tout_text = (
+                f"{solved_temperature:.8g}"
+            )
+
+            label = "Hot outlet temperature"
+            result = f"{solved_temperature:.6g} °C"
+
+        # ----------------------------------------------------
+        # Solve missing cold-side flow
+        # ----------------------------------------------------
+
+        elif missing == "cold_flow_text":
+            hot_flow = flow_to_kg_s(
+                parse_required(
+                    st.session_state.hot_flow_text,
+                    "Hot mass flow",
+                ),
+                st.session_state.hot_flow_unit,
+            )
+
+            hot_tout = parse_required(
+                st.session_state.hot_tout_text,
+                "Hot outlet temperature",
+            )
+
+            cold_tout = parse_required(
+                st.session_state.cold_tout_text,
+                "Cold outlet temperature",
+            )
+
+            h_hot_in = enthalpy_kj_kg(
+                hot_fluid,
+                hot_tin,
+                hot_pin,
+            )
+
+            h_hot_out = enthalpy_kj_kg(
+                hot_fluid,
+                hot_tout,
+                hot_pout,
+            )
+
+            duty = hot_flow * (h_hot_in - h_hot_out)
+
+            h_cold_in = enthalpy_kj_kg(
+                cold_fluid,
+                cold_tin,
+                cold_pin,
+            )
+
+            h_cold_out = enthalpy_kj_kg(
+                cold_fluid,
+                cold_tout,
+                cold_pout,
+            )
+
+            cold_delta_h = h_cold_out - h_cold_in
+
+            if duty <= 0 or cold_delta_h <= 0:
+                raise ValueError(
+                    "The entered temperatures do not produce "
+                    "a positive heat duty."
+                )
+
+            solved_kg_s = duty / cold_delta_h
+
+            solved_display = flow_from_kg_s(
+                solved_kg_s,
+                st.session_state.cold_flow_unit,
+            )
+
+            st.session_state.cold_flow_text = (
+                f"{solved_display:.8g}"
+            )
+
+            label = "Cold mass flow"
+            result = (
+                f"{solved_display:.6g} "
+                f"{st.session_state.cold_flow_unit}"
+            )
+
+        # ----------------------------------------------------
+        # Solve missing cold outlet temperature
+        # ----------------------------------------------------
+
+        else:
+            hot_flow = flow_to_kg_s(
+                parse_required(
+                    st.session_state.hot_flow_text,
+                    "Hot mass flow",
+                ),
+                st.session_state.hot_flow_unit,
+            )
+
+            hot_tout = parse_required(
+                st.session_state.hot_tout_text,
+                "Hot outlet temperature",
+            )
+
+            cold_flow = flow_to_kg_s(
+                parse_required(
+                    st.session_state.cold_flow_text,
+                    "Cold mass flow",
+                ),
+                st.session_state.cold_flow_unit,
+            )
+
+            h_hot_in = enthalpy_kj_kg(
+                hot_fluid,
+                hot_tin,
+                hot_pin,
+            )
+
+            h_hot_out = enthalpy_kj_kg(
+                hot_fluid,
+                hot_tout,
+                hot_pout,
+            )
+
+            duty = hot_flow * (h_hot_in - h_hot_out)
+
+            if cold_flow <= 0 or duty <= 0:
+                raise ValueError(
+                    "Mass flow and heat duty must be positive."
+                )
+
+            h_cold_in = enthalpy_kj_kg(
+                cold_fluid,
+                cold_tin,
+                cold_pin,
+            )
+
+            required_h_cold_out = (
+                h_cold_in + duty / cold_flow
+            )
+
+            solved_temperature = temperature_from_enthalpy(
+                cold_fluid,
+                required_h_cold_out,
+                cold_pout,
+            )
+
+            st.session_state.cold_tout_text = (
+                f"{solved_temperature:.8g}"
+            )
+
+            label = "Cold outlet temperature"
+            result = f"{solved_temperature:.6g} °C"
+
+        st.session_state.balance_success_message = (
+            f"{label} calculated automatically: {result}"
+        )
+
+    except Exception as error:
+        st.session_state.balance_error_message = str(error)
+
+
+# ============================================================
+# PROFILE AND WTD CALCULATION
+# ============================================================
+
+def create_temperature_profiles(
+    hot,
+    cold,
+    total_duty,
+    flow_arrangement,
+):
+    """
+    Generate 10 profile points for 9 equal-duty segments.
+
+    Counter-current profile direction:
+    hot inlet -> hot outlet
+    cold outlet -> cold inlet
+
+    Co-current profile direction:
+    hot inlet -> hot outlet
+    cold inlet -> cold outlet
+    """
+
+    hot_temperatures = []
+    cold_temperatures = []
+
+    for point in range(NUMBER_OF_SEGMENTS + 1):
+        fraction = point / NUMBER_OF_SEGMENTS
+        accumulated_duty = total_duty * fraction
+
+        # Hot side always runs from inlet to outlet.
+        hot_enthalpy = (
+            hot["h_in"]
+            - accumulated_duty / hot["flow_kg_s"]
+        )
+
+        hot_pressure = (
+            hot["pin"]
+            + fraction * (hot["pout"] - hot["pin"])
+        )
+
+        if flow_arrangement == "Counter-current":
+            # Profile is traversed from cold outlet to cold inlet.
+            cold_enthalpy = (
+                cold["h_out"]
+                - accumulated_duty / cold["flow_kg_s"]
+            )
+
+            cold_pressure = (
+                cold["pout"]
+                + fraction * (cold["pin"] - cold["pout"])
+            )
+
+        else:
+            # Both streams are traversed inlet to outlet.
+            cold_enthalpy = (
+                cold["h_in"]
+                + accumulated_duty / cold["flow_kg_s"]
+            )
+
+            cold_pressure = (
+                cold["pin"]
+                + fraction * (cold["pout"] - cold["pin"])
+            )
+
+        hot_temperature = temperature_from_enthalpy(
+            hot["fluid_code"],
+            hot_enthalpy,
+            hot_pressure,
+        )
+
+        cold_temperature = temperature_from_enthalpy(
+            cold["fluid_code"],
+            cold_enthalpy,
+            cold_pressure,
+        )
+
+        hot_temperatures.append(hot_temperature)
+        cold_temperatures.append(cold_temperature)
+
+    return hot_temperatures, cold_temperatures
 
 
 def calculate_wtd(
     hot_temperatures,
     cold_temperatures,
-    total_duty_kw,
+    total_duty,
+    hot_is_hotter,
 ):
     """
-    Reproduces the Excel method:
+    Excel-equivalent calculation:
 
     dQi = Q / 9
-    dLMTDi = (dT1i - dT2i) / ln(dT1i / dT2i)
-    dQ/dLMTD = dQi / dLMTDi
-    WTD = Q / sum(dQi / dLMTDi)
+
+    dLMTDi = (dT1i - dT2i) / LN(dT1i / dT2i)
+
+    dQ/dLMTDi = dQi / dLMTDi
+
+    WTD = Q / SUM(dQ/dLMTDi)
     """
+
     duty_per_segment = (
-        total_duty_kw / NUMBER_OF_SEGMENTS
+        total_duty / NUMBER_OF_SEGMENTS
     )
 
-    total_dq_over_lmtd = 0.0
-    segment_results = []
+    sum_dq_over_lmtd = 0.0
+    segment_rows = []
 
     for index in range(NUMBER_OF_SEGMENTS):
-        delta_t_1 = (
-            hot_temperatures[index]
-            - cold_temperatures[index]
-        )
+        if hot_is_hotter:
+            delta_t_1 = (
+                hot_temperatures[index]
+                - cold_temperatures[index]
+            )
 
-        delta_t_2 = (
-            hot_temperatures[index + 1]
-            - cold_temperatures[index + 1]
-        )
+            delta_t_2 = (
+                hot_temperatures[index + 1]
+                - cold_temperatures[index + 1]
+            )
+
+        else:
+            # Equivalent to the direction-selection IF in Excel.
+            delta_t_1 = (
+                cold_temperatures[index]
+                - hot_temperatures[index]
+            )
+
+            delta_t_2 = (
+                cold_temperatures[index + 1]
+                - hot_temperatures[index + 1]
+            )
 
         segment_lmtd = (
             logarithmic_mean_temperature_difference(
@@ -316,9 +670,9 @@ def calculate_wtd(
             duty_per_segment / segment_lmtd
         )
 
-        total_dq_over_lmtd += dq_over_lmtd
+        sum_dq_over_lmtd += dq_over_lmtd
 
-        segment_results.append(
+        segment_rows.append(
             {
                 "Segment": index + 1,
                 "Hot T1 [°C]": hot_temperatures[index],
@@ -333,788 +687,336 @@ def calculate_wtd(
             }
         )
 
-    if total_dq_over_lmtd <= 0:
+    if sum_dq_over_lmtd <= 0:
         raise ValueError(
-            "The sum of dQi/dLMTD is not positive."
+            "The WTD conductance sum is not positive."
         )
 
-    wtd = total_duty_kw / total_dq_over_lmtd
+    wtd = total_duty / sum_dq_over_lmtd
 
-    return wtd, segment_results
+    return wtd, segment_rows, sum_dq_over_lmtd
 
 
 # ============================================================
-# STREAM DATA
+# INPUTS
 # ============================================================
-
-def get_stream_data(side):
-    """
-    Read one stream from Streamlit session state.
-    """
-    fluid_name = st.session_state[
-        f"{side}_fluid_name"
-    ]
-
-    flow_value = parse_optional_number(
-        st.session_state[f"{side}_flow_text"]
-    )
-
-    outlet_temperature = parse_optional_number(
-        st.session_state[f"{side}_tout_text"]
-    )
-
-    flow_unit = st.session_state[
-        f"{side}_flow_unit"
-    ]
-
-    return {
-        "fluid_name": fluid_name,
-        "fluid_code": FLUIDS[fluid_name],
-        "flow_value": flow_value,
-        "flow_unit": flow_unit,
-        "flow_kg_s": (
-            None
-            if flow_value is None
-            else mass_flow_to_kg_s(
-                flow_value,
-                flow_unit,
-            )
-        ),
-        "temperature_in": st.session_state[
-            f"{side}_tin"
-        ],
-        "temperature_out": outlet_temperature,
-        "pressure_in": st.session_state[
-            f"{side}_pin"
-        ],
-        "pressure_out": st.session_state[
-            f"{side}_pout"
-        ],
-    }
-
-
-def side_input_area(
-    title,
-    side,
-    default_fluid,
-    default_flow,
-    default_tin,
-    default_tout,
-    default_pressure,
-):
-    st.subheader(title)
-
-    fluid_names = list(FLUIDS.keys())
-
-    st.selectbox(
-        "Fluid",
-        fluid_names,
-        index=fluid_names.index(default_fluid),
-        key=f"{side}_fluid_name",
-    )
-
-    flow_column, unit_column = st.columns(2)
-
-    flow_column.text_input(
-        "Mass flow — may be left empty",
-        value=default_flow,
-        key=f"{side}_flow_text",
-    )
-
-    unit_column.selectbox(
-        "Flow unit",
-        list(FLOW_UNITS.keys()),
-        index=1,
-        key=f"{side}_flow_unit",
-    )
-
-    temperature_in_column, temperature_out_column = (
-        st.columns(2)
-    )
-
-    temperature_in_column.number_input(
-        "Inlet temperature [°C]",
-        value=float(default_tin),
-        format="%.4f",
-        key=f"{side}_tin",
-    )
-
-    temperature_out_column.text_input(
-        "Outlet temperature [°C] — may be left empty",
-        value=default_tout,
-        key=f"{side}_tout_text",
-    )
-
-    pressure_in_column, pressure_out_column = (
-        st.columns(2)
-    )
-
-    pressure_in_column.number_input(
-        "Inlet pressure [bar(a)]",
-        min_value=0.001,
-        value=float(default_pressure),
-        format="%.4f",
-        key=f"{side}_pin",
-    )
-
-    pressure_out_column.number_input(
-        "Outlet pressure [bar(a)]",
-        min_value=0.001,
-        value=float(default_pressure),
-        format="%.4f",
-        key=f"{side}_pout",
-    )
-
-
-# ============================================================
-# AUTOMATIC HEAT-BALANCE SOLVER
-# ============================================================
-
-def balance_missing_field():
-    """
-    Fill exactly one missing field:
-
-    - hot mass flow
-    - hot outlet temperature
-    - cold mass flow
-    - cold outlet temperature
-    """
-    st.session_state["balance_success"] = ""
-    st.session_state["balance_error"] = ""
-
-    try:
-        hot = get_stream_data("hot")
-        cold = get_stream_data("cold")
-
-        missing_fields = []
-
-        if hot["flow_value"] is None:
-            missing_fields.append("hot_flow")
-
-        if hot["temperature_out"] is None:
-            missing_fields.append("hot_tout")
-
-        if cold["flow_value"] is None:
-            missing_fields.append("cold_flow")
-
-        if cold["temperature_out"] is None:
-            missing_fields.append("cold_tout")
-
-        if len(missing_fields) == 0:
-            raise ValueError(
-                "No field is empty. Clear exactly one mass-flow "
-                "or outlet-temperature field."
-            )
-
-        if len(missing_fields) > 1:
-            raise ValueError(
-                "More than one balance field is empty. "
-                "Leave exactly one field empty."
-            )
-
-        missing = missing_fields[0]
-
-        h_hot_in = enthalpy_kj_kg(
-            hot["fluid_code"],
-            hot["temperature_in"],
-            hot["pressure_in"],
-        )
-
-        h_cold_in = enthalpy_kj_kg(
-            cold["fluid_code"],
-            cold["temperature_in"],
-            cold["pressure_in"],
-        )
-
-        # ----------------------------------------------------
-        # Missing hot mass flow
-        # ----------------------------------------------------
-
-        if missing == "hot_flow":
-            if cold["flow_kg_s"] is None:
-                raise ValueError(
-                    "Cold-side flow is required."
-                )
-
-            h_hot_out = enthalpy_kj_kg(
-                hot["fluid_code"],
-                hot["temperature_out"],
-                hot["pressure_out"],
-            )
-
-            h_cold_out = enthalpy_kj_kg(
-                cold["fluid_code"],
-                cold["temperature_out"],
-                cold["pressure_out"],
-            )
-
-            q_cold = (
-                cold["flow_kg_s"]
-                * (h_cold_out - h_cold_in)
-            )
-
-            hot_delta_h = h_hot_in - h_hot_out
-
-            if q_cold <= 0 or hot_delta_h <= 0:
-                raise ValueError(
-                    "The entered temperatures do not produce "
-                    "a positive heat duty."
-                )
-
-            solved_flow_kg_s = q_cold / hot_delta_h
-
-            solved_display_flow = mass_flow_from_kg_s(
-                solved_flow_kg_s,
-                hot["flow_unit"],
-            )
-
-            st.session_state["hot_flow_text"] = (
-                f"{solved_display_flow:.6f}"
-            )
-
-            solved_name = "hot-side mass flow"
-            solved_value = (
-                f"{solved_display_flow:.6f} "
-                f"{hot['flow_unit']}"
-            )
-
-        # ----------------------------------------------------
-        # Missing cold mass flow
-        # ----------------------------------------------------
-
-        elif missing == "cold_flow":
-            if hot["flow_kg_s"] is None:
-                raise ValueError(
-                    "Hot-side flow is required."
-                )
-
-            h_hot_out = enthalpy_kj_kg(
-                hot["fluid_code"],
-                hot["temperature_out"],
-                hot["pressure_out"],
-            )
-
-            h_cold_out = enthalpy_kj_kg(
-                cold["fluid_code"],
-                cold["temperature_out"],
-                cold["pressure_out"],
-            )
-
-            q_hot = (
-                hot["flow_kg_s"]
-                * (h_hot_in - h_hot_out)
-            )
-
-            cold_delta_h = h_cold_out - h_cold_in
-
-            if q_hot <= 0 or cold_delta_h <= 0:
-                raise ValueError(
-                    "The entered temperatures do not produce "
-                    "a positive heat duty."
-                )
-
-            solved_flow_kg_s = q_hot / cold_delta_h
-
-            solved_display_flow = mass_flow_from_kg_s(
-                solved_flow_kg_s,
-                cold["flow_unit"],
-            )
-
-            st.session_state["cold_flow_text"] = (
-                f"{solved_display_flow:.6f}"
-            )
-
-            solved_name = "cold-side mass flow"
-            solved_value = (
-                f"{solved_display_flow:.6f} "
-                f"{cold['flow_unit']}"
-            )
-
-        # ----------------------------------------------------
-        # Missing hot outlet temperature
-        # ----------------------------------------------------
-
-        elif missing == "hot_tout":
-            if hot["flow_kg_s"] is None:
-                raise ValueError(
-                    "Hot-side flow is required."
-                )
-
-            h_cold_out = enthalpy_kj_kg(
-                cold["fluid_code"],
-                cold["temperature_out"],
-                cold["pressure_out"],
-            )
-
-            q_cold = (
-                cold["flow_kg_s"]
-                * (h_cold_out - h_cold_in)
-            )
-
-            if q_cold <= 0:
-                raise ValueError(
-                    "The cold side does not produce "
-                    "a positive heat duty."
-                )
-
-            target_hot_outlet_h = (
-                h_hot_in
-                - q_cold / hot["flow_kg_s"]
-            )
-
-            solved_temperature = temperature_from_enthalpy(
-                hot["fluid_code"],
-                target_hot_outlet_h,
-                hot["pressure_out"],
-                suggested_min_c=-250.0,
-                suggested_max_c=hot["temperature_in"] + 300.0,
-            )
-
-            if solved_temperature >= hot["temperature_in"]:
-                raise ValueError(
-                    "The solved hot outlet temperature is not "
-                    "below the hot inlet temperature."
-                )
-
-            st.session_state["hot_tout_text"] = (
-                f"{solved_temperature:.6f}"
-            )
-
-            solved_name = "hot-side outlet temperature"
-            solved_value = f"{solved_temperature:.6f} °C"
-
-        # ----------------------------------------------------
-        # Missing cold outlet temperature
-        # ----------------------------------------------------
-
-        else:
-            if cold["flow_kg_s"] is None:
-                raise ValueError(
-                    "Cold-side flow is required."
-                )
-
-            h_hot_out = enthalpy_kj_kg(
-                hot["fluid_code"],
-                hot["temperature_out"],
-                hot["pressure_out"],
-            )
-
-            q_hot = (
-                hot["flow_kg_s"]
-                * (h_hot_in - h_hot_out)
-            )
-
-            if q_hot <= 0:
-                raise ValueError(
-                    "The hot side does not produce "
-                    "a positive heat duty."
-                )
-
-            target_cold_outlet_h = (
-                h_cold_in
-                + q_hot / cold["flow_kg_s"]
-            )
-
-            solved_temperature = temperature_from_enthalpy(
-                cold["fluid_code"],
-                target_cold_outlet_h,
-                cold["pressure_out"],
-                suggested_min_c=cold["temperature_in"] - 100.0,
-                suggested_max_c=1200.0,
-            )
-
-            if solved_temperature <= cold["temperature_in"]:
-                raise ValueError(
-                    "The solved cold outlet temperature is not "
-                    "above the cold inlet temperature."
-                )
-
-            st.session_state["cold_tout_text"] = (
-                f"{solved_temperature:.6f}"
-            )
-
-            solved_name = "cold-side outlet temperature"
-            solved_value = f"{solved_temperature:.6f} °C"
-
-        st.session_state["balance_success"] = (
-            f"Calculated {solved_name}: {solved_value}"
-        )
-
-    except Exception as error:
-        st.session_state["balance_error"] = str(error)
-
-
-# ============================================================
-# PROFILE GENERATION
-# ============================================================
-
-def create_temperature_profiles(
-    hot,
-    cold,
-    flow_arrangement,
-):
-    """
-    Generate 10 temperatures for nine equal-duty segments.
-
-    Enthalpy and pressure are interpolated between the actual
-    balanced inlet and outlet conditions.
-    """
-    h_hot_in = enthalpy_kj_kg(
-        hot["fluid_code"],
-        hot["temperature_in"],
-        hot["pressure_in"],
-    )
-
-    h_hot_out = enthalpy_kj_kg(
-        hot["fluid_code"],
-        hot["temperature_out"],
-        hot["pressure_out"],
-    )
-
-    h_cold_in = enthalpy_kj_kg(
-        cold["fluid_code"],
-        cold["temperature_in"],
-        cold["pressure_in"],
-    )
-
-    h_cold_out = enthalpy_kj_kg(
-        cold["fluid_code"],
-        cold["temperature_out"],
-        cold["pressure_out"],
-    )
-
-    hot_profile = []
-    cold_profile = []
-
-    for index in range(NUMBER_OF_SEGMENTS + 1):
-        fraction = index / NUMBER_OF_SEGMENTS
-
-        # Hot side always runs inlet to outlet
-        hot_h = (
-            h_hot_in
-            + fraction * (h_hot_out - h_hot_in)
-        )
-
-        hot_pressure = (
-            hot["pressure_in"]
-            + fraction
-            * (
-                hot["pressure_out"]
-                - hot["pressure_in"]
-            )
-        )
-
-        if index == 0:
-            hot_temperature = hot["temperature_in"]
-
-        elif index == NUMBER_OF_SEGMENTS:
-            hot_temperature = hot["temperature_out"]
-
-        else:
-            hot_temperature = temperature_from_enthalpy(
-                hot["fluid_code"],
-                hot_h,
-                hot_pressure,
-                suggested_min_c=(
-                    min(
-                        hot["temperature_in"],
-                        hot["temperature_out"],
-                    )
-                    - 50.0
-                ),
-                suggested_max_c=(
-                    max(
-                        hot["temperature_in"],
-                        hot["temperature_out"],
-                    )
-                    + 50.0
-                ),
-            )
-
-        # Cold-side direction depends on arrangement
-        if flow_arrangement == "Counter-current":
-            cold_h_start = h_cold_out
-            cold_h_end = h_cold_in
-
-            cold_pressure_start = cold["pressure_out"]
-            cold_pressure_end = cold["pressure_in"]
-
-            cold_temperature_start = (
-                cold["temperature_out"]
-            )
-
-            cold_temperature_end = (
-                cold["temperature_in"]
-            )
-
-        else:
-            cold_h_start = h_cold_in
-            cold_h_end = h_cold_out
-
-            cold_pressure_start = cold["pressure_in"]
-            cold_pressure_end = cold["pressure_out"]
-
-            cold_temperature_start = (
-                cold["temperature_in"]
-            )
-
-            cold_temperature_end = (
-                cold["temperature_out"]
-            )
-
-        cold_h = (
-            cold_h_start
-            + fraction * (cold_h_end - cold_h_start)
-        )
-
-        cold_pressure = (
-            cold_pressure_start
-            + fraction
-            * (
-                cold_pressure_end
-                - cold_pressure_start
-            )
-        )
-
-        if index == 0:
-            cold_temperature = cold_temperature_start
-
-        elif index == NUMBER_OF_SEGMENTS:
-            cold_temperature = cold_temperature_end
-
-        else:
-            cold_temperature = temperature_from_enthalpy(
-                cold["fluid_code"],
-                cold_h,
-                cold_pressure,
-                suggested_min_c=(
-                    min(
-                        cold["temperature_in"],
-                        cold["temperature_out"],
-                    )
-                    - 50.0
-                ),
-                suggested_max_c=(
-                    max(
-                        cold["temperature_in"],
-                        cold["temperature_out"],
-                    )
-                    + 50.0
-                ),
-            )
-
-        hot_profile.append(hot_temperature)
-        cold_profile.append(cold_temperature)
-
-    return (
-        hot_profile,
-        cold_profile,
-        h_hot_in,
-        h_hot_out,
-        h_cold_in,
-        h_cold_out,
-    )
-
-
-# ============================================================
-# USER INTERFACE
-# ============================================================
-
-st.info(
-    "Leave exactly one of these fields empty: hot mass flow, "
-    "hot outlet temperature, cold mass flow, or cold outlet "
-    "temperature. Then click **Balance missing field**."
-)
 
 hot_column, cold_column = st.columns(2)
 
 with hot_column:
-    side_input_area(
-        title="🔴 Hot side",
-        side="hot",
-        default_fluid="Water",
-        default_flow="10000",
-        default_tin=90.0,
-        default_tout="60",
-        default_pressure=5.0,
+    st.subheader("🔴 Hot side")
+
+    st.selectbox(
+        "Fluid",
+        options=list(FLUIDS.keys()),
+        index=list(FLUIDS.keys()).index("Water"),
+        key="hot_fluid",
+    )
+
+    flow_1, flow_2 = st.columns(2)
+
+    flow_1.text_input(
+        "Mass flow",
+        value="10000",
+        placeholder="Leave empty to calculate",
+        key="hot_flow_text",
+    )
+
+    flow_2.selectbox(
+        "Flow unit",
+        options=list(FLOW_FACTORS_TO_KG_S.keys()),
+        index=1,
+        key="hot_flow_unit",
+    )
+
+    temperature_1, temperature_2 = st.columns(2)
+
+    temperature_1.number_input(
+        "Inlet temperature [°C]",
+        value=90.0,
+        key="hot_tin",
+    )
+
+    temperature_2.text_input(
+        "Outlet temperature [°C]",
+        value="60",
+        placeholder="Leave empty to calculate",
+        key="hot_tout_text",
+    )
+
+    pressure_1, pressure_2 = st.columns(2)
+
+    pressure_1.number_input(
+        "Inlet pressure [bar(a)]",
+        min_value=0.001,
+        value=5.0,
+        key="hot_pin",
+    )
+
+    pressure_2.number_input(
+        "Outlet pressure [bar(a)]",
+        min_value=0.001,
+        value=5.0,
+        key="hot_pout",
     )
 
 with cold_column:
-    side_input_area(
-        title="🔵 Cold side",
-        side="cold",
-        default_fluid="Water",
-        default_flow="10000",
-        default_tin=20.0,
-        default_tout="",
-        default_pressure=5.0,
+    st.subheader("🔵 Cold side")
+
+    st.selectbox(
+        "Fluid",
+        options=list(FLUIDS.keys()),
+        index=list(FLUIDS.keys()).index("Water"),
+        key="cold_fluid",
     )
 
-st.button(
-    "⚖️ Balance missing field",
-    type="primary",
-    on_click=balance_missing_field,
-)
+    flow_1, flow_2 = st.columns(2)
 
-if st.session_state.get("balance_success"):
-    st.success(st.session_state["balance_success"])
+    flow_1.text_input(
+        "Mass flow",
+        value="",
+        placeholder="Leave empty to calculate",
+        key="cold_flow_text",
+    )
 
-if st.session_state.get("balance_error"):
-    st.error(st.session_state["balance_error"])
+    flow_2.selectbox(
+        "Flow unit",
+        options=list(FLOW_FACTORS_TO_KG_S.keys()),
+        index=1,
+        key="cold_flow_unit",
+    )
+
+    temperature_1, temperature_2 = st.columns(2)
+
+    temperature_1.number_input(
+        "Inlet temperature [°C]",
+        value=20.0,
+        key="cold_tin",
+    )
+
+    temperature_2.text_input(
+        "Outlet temperature [°C]",
+        value="50",
+        placeholder="Leave empty to calculate",
+        key="cold_tout_text",
+    )
+
+    pressure_1, pressure_2 = st.columns(2)
+
+    pressure_1.number_input(
+        "Inlet pressure [bar(a)]",
+        min_value=0.001,
+        value=5.0,
+        key="cold_pin",
+    )
+
+    pressure_2.number_input(
+        "Outlet pressure [bar(a)]",
+        min_value=0.001,
+        value=5.0,
+        key="cold_pout",
+    )
 
 st.divider()
 
-option_column_1, option_column_2 = st.columns(2)
+flow_arrangement = st.radio(
+    "Flow arrangement",
+    options=["Counter-current", "Co-current"],
+    horizontal=True,
+)
 
-with option_column_1:
-    flow_arrangement = st.radio(
-        "Flow arrangement",
-        [
-            "Counter-current",
-            "Co-current",
-        ],
-        horizontal=True,
+st.info(
+    "Leave exactly one mass-flow or outlet-temperature field empty, "
+    "then click **Balance and calculate**."
+)
+
+st.button(
+    "⚖️ Balance and calculate",
+    type="primary",
+    on_click=automatically_balance,
+)
+
+if st.session_state.get("balance_success_message"):
+    st.success(
+        st.session_state.balance_success_message
     )
 
-with option_column_2:
-    geometry_factor = st.number_input(
-        "Correction geometry factor",
-        min_value=0.01,
-        max_value=1.00,
-        value=0.90,
-        step=0.01,
-        format="%.3f",
-        help="ETD = WTD × correction geometry factor",
+if st.session_state.get("balance_error_message"):
+    st.error(
+        st.session_state.balance_error_message
     )
 
 
 # ============================================================
-# MAIN CALCULATION
+# READ THE COMPLETED INPUTS
+# ============================================================
+
+balance_input_values = [
+    st.session_state.hot_flow_text,
+    st.session_state.hot_tout_text,
+    st.session_state.cold_flow_text,
+    st.session_state.cold_tout_text,
+]
+
+if any(
+    str(value).strip() == ""
+    for value in balance_input_values
+):
+    st.warning(
+        "One field is still empty. Click "
+        "**Balance and calculate** to solve it."
+    )
+
+    st.stop()
+
+
+# ============================================================
+# FINAL CALCULATION
 # ============================================================
 
 try:
-    hot = get_stream_data("hot")
-    cold = get_stream_data("cold")
-
-    missing_fields = []
-
-    if hot["flow_value"] is None:
-        missing_fields.append("hot mass flow")
-
-    if hot["temperature_out"] is None:
-        missing_fields.append("hot outlet temperature")
-
-    if cold["flow_value"] is None:
-        missing_fields.append("cold mass flow")
-
-    if cold["temperature_out"] is None:
-        missing_fields.append("cold outlet temperature")
-
-    if missing_fields:
-        st.info(
-            "Waiting for heat balance. Missing: "
-            + ", ".join(missing_fields)
-        )
-
-        st.stop()
-
-    if hot["flow_kg_s"] <= 0:
-        raise ValueError(
-            "Hot-side mass flow must be positive."
-        )
-
-    if cold["flow_kg_s"] <= 0:
-        raise ValueError(
-            "Cold-side mass flow must be positive."
-        )
-
-    (
-        hot_profile,
-        cold_profile,
-        h_hot_in,
-        h_hot_out,
-        h_cold_in,
-        h_cold_out,
-    ) = create_temperature_profiles(
-        hot,
-        cold,
-        flow_arrangement,
+    hot_flow = flow_to_kg_s(
+        parse_required(
+            st.session_state.hot_flow_text,
+            "Hot mass flow",
+        ),
+        st.session_state.hot_flow_unit,
     )
 
-    q_hot = (
-        hot["flow_kg_s"]
-        * (h_hot_in - h_hot_out)
+    cold_flow = flow_to_kg_s(
+        parse_required(
+            st.session_state.cold_flow_text,
+            "Cold mass flow",
+        ),
+        st.session_state.cold_flow_unit,
     )
 
-    q_cold = (
-        cold["flow_kg_s"]
-        * (h_cold_out - h_cold_in)
+    hot_tout = parse_required(
+        st.session_state.hot_tout_text,
+        "Hot outlet temperature",
+    )
+
+    cold_tout = parse_required(
+        st.session_state.cold_tout_text,
+        "Cold outlet temperature",
+    )
+
+    if hot_flow <= 0 or cold_flow <= 0:
+        raise ValueError(
+            "Both mass flows must be greater than zero."
+        )
+
+    hot = {
+        "fluid_name": st.session_state.hot_fluid,
+        "fluid_code": FLUIDS[st.session_state.hot_fluid],
+        "flow_kg_s": hot_flow,
+        "tin": float(st.session_state.hot_tin),
+        "tout": hot_tout,
+        "pin": float(st.session_state.hot_pin),
+        "pout": float(st.session_state.hot_pout),
+    }
+
+    cold = {
+        "fluid_name": st.session_state.cold_fluid,
+        "fluid_code": FLUIDS[st.session_state.cold_fluid],
+        "flow_kg_s": cold_flow,
+        "tin": float(st.session_state.cold_tin),
+        "tout": cold_tout,
+        "pin": float(st.session_state.cold_pin),
+        "pout": float(st.session_state.cold_pout),
+    }
+
+    hot["h_in"] = enthalpy_kj_kg(
+        hot["fluid_code"],
+        hot["tin"],
+        hot["pin"],
+    )
+
+    hot["h_out"] = enthalpy_kj_kg(
+        hot["fluid_code"],
+        hot["tout"],
+        hot["pout"],
+    )
+
+    cold["h_in"] = enthalpy_kj_kg(
+        cold["fluid_code"],
+        cold["tin"],
+        cold["pin"],
+    )
+
+    cold["h_out"] = enthalpy_kj_kg(
+        cold["fluid_code"],
+        cold["tout"],
+        cold["pout"],
+    )
+
+    q_hot = hot["flow_kg_s"] * (
+        hot["h_in"] - hot["h_out"]
+    )
+
+    q_cold = cold["flow_kg_s"] * (
+        cold["h_out"] - cold["h_in"]
     )
 
     if q_hot <= 0:
         raise ValueError(
-            "Hot-side duty is not positive."
+            "The hot-side heat duty is not positive."
         )
 
     if q_cold <= 0:
         raise ValueError(
-            "Cold-side duty is not positive."
+            "The cold-side heat duty is not positive."
         )
+
+    balance_error = calculate_balance_error(
+        q_hot,
+        q_cold,
+    )
 
     total_duty = (q_hot + q_cold) / 2.0
 
-    balance_error = (
-        abs(q_hot - q_cold)
-        / max(abs(q_hot), abs(q_cold))
-        * 100.0
-    )
+    # --------------------------------------------------------
+    # Conventional overall LMTD
+    # --------------------------------------------------------
 
-    # Standard exchanger LMTD
     if flow_arrangement == "Counter-current":
-        terminal_dt_1 = (
-            hot["temperature_in"]
-            - cold["temperature_out"]
-        )
-
-        terminal_dt_2 = (
-            hot["temperature_out"]
-            - cold["temperature_in"]
-        )
-
+        overall_dt_1 = hot["tin"] - cold["tout"]
+        overall_dt_2 = hot["tout"] - cold["tin"]
     else:
-        terminal_dt_1 = (
-            hot["temperature_in"]
-            - cold["temperature_in"]
-        )
+        overall_dt_1 = hot["tin"] - cold["tin"]
+        overall_dt_2 = hot["tout"] - cold["tout"]
 
-        terminal_dt_2 = (
-            hot["temperature_out"]
-            - cold["temperature_out"]
-        )
-
-    overall_lmtd = (
+    conventional_lmtd = (
         logarithmic_mean_temperature_difference(
-            terminal_dt_1,
-            terminal_dt_2,
+            overall_dt_1,
+            overall_dt_2,
         )
     )
 
-    # Nine-segment WTD
-    wtd, segment_results = calculate_wtd(
-        hot_profile,
-        cold_profile,
+    # --------------------------------------------------------
+    # Ten temperature points and nine WTD segments
+    # --------------------------------------------------------
+
+    hot_temperatures, cold_temperatures = (
+        create_temperature_profiles(
+            hot,
+            cold,
+            total_duty,
+            flow_arrangement,
+        )
+    )
+
+    hot_is_hotter = hot["tin"] > cold["tin"]
+
+    wtd, segment_rows, total_ua = calculate_wtd(
+        hot_temperatures,
+        cold_temperatures,
         total_duty,
+        hot_is_hotter,
     )
 
-    # Geometry correction
-    etd = wtd * geometry_factor
-
-    if etd <= 0:
-        raise ValueError(
-            "ETD must be greater than zero."
-        )
-
-    required_ua = total_duty / etd
+    # Q / WTD equals SUM(dQi / dLMTDi)
+    ua_based_on_wtd = total_duty / wtd
 
     # ========================================================
     # RESULTS
@@ -1122,189 +1024,134 @@ try:
 
     st.subheader("Results")
 
-    result_1, result_2, result_3, result_4 = (
-        st.columns(4)
-    )
+    result_1, result_2, result_3, result_4 = st.columns(4)
 
     result_1.metric(
-        "Heat duty",
+        "Balanced heat duty",
         f"{total_duty:,.2f} kW",
     )
 
     result_2.metric(
-        "WTD",
-        f"{wtd:,.3f} K",
+        "Conventional LMTD",
+        f"{conventional_lmtd:,.3f} K",
     )
 
     result_3.metric(
-        "ETD",
-        f"{etd:,.3f} K",
+        "Weighted temperature difference",
+        f"{wtd:,.3f} K",
     )
 
     result_4.metric(
-        "Required UA",
-        f"{required_ua:,.3f} kW/K",
+        "UA based on WTD",
+        f"{ua_based_on_wtd:,.3f} kW/K",
     )
 
-    secondary_1, secondary_2, secondary_3 = (
-        st.columns(3)
+    duty_1, duty_2, duty_3 = st.columns(3)
+
+    duty_1.metric(
+        "Hot-side duty",
+        f"{q_hot:,.3f} kW",
     )
 
-    secondary_1.metric(
-        "Standard LMTD",
-        f"{overall_lmtd:,.3f} K",
+    duty_2.metric(
+        "Cold-side duty",
+        f"{q_cold:,.3f} kW",
     )
 
-    secondary_2.metric(
-        "Geometry factor",
-        f"{geometry_factor:.3f}",
-    )
-
-    secondary_3.metric(
+    duty_3.metric(
         "Energy imbalance",
-        f"{balance_error:.4f}%",
+        f"{balance_error:,.6f}%",
     )
 
     if balance_error <= 0.1:
         st.success(
-            "Hot and cold heat duties are balanced."
-        )
-    elif balance_error <= 5.0:
-        st.warning(
-            "The energy imbalance is below 5%, but the "
-            "calculation is not fully balanced."
+            "The heat balance is within 0.1%."
         )
     else:
-        st.error(
-            "Energy imbalance exceeds 5%. Leave one balance "
-            "field empty and use the automatic solver."
+        st.warning(
+            "The two sides are not fully balanced. "
+            "Clear one calculated field and run the balance again."
         )
 
     # ========================================================
-    # DUTY DETAILS
-    # ========================================================
-
-    with st.expander(
-        "Heat-balance details",
-        expanded=False,
-    ):
-        st.write(
-            f"Hot-side duty: **{q_hot:,.4f} kW**"
-        )
-
-        st.write(
-            f"Cold-side duty: **{q_cold:,.4f} kW**"
-        )
-
-        st.write(
-            f"Hot inlet enthalpy: "
-            f"**{h_hot_in:,.4f} kJ/kg**"
-        )
-
-        st.write(
-            f"Hot outlet enthalpy: "
-            f"**{h_hot_out:,.4f} kJ/kg**"
-        )
-
-        st.write(
-            f"Cold inlet enthalpy: "
-            f"**{h_cold_in:,.4f} kJ/kg**"
-        )
-
-        st.write(
-            f"Cold outlet enthalpy: "
-            f"**{h_cold_out:,.4f} kJ/kg**"
-        )
-
-    # ========================================================
-    # WTD SEGMENT TABLE
+    # DETAILS
     # ========================================================
 
     with st.expander(
         "Nine-segment WTD calculation",
         expanded=False,
     ):
-        st.latex(
-            r"WTD="
-            r"\frac{Q}"
-            r"{\sum_{i=1}^{9}"
-            r"\left(\frac{\Delta Q_i}"
-            r"{dLMTD_i}\right)}"
+        st.write(
+            f"Number of segments: **{NUMBER_OF_SEGMENTS}**"
+        )
+
+        st.write(
+            "Duty per segment: "
+            f"**{total_duty / NUMBER_OF_SEGMENTS:,.3f} kW**"
+        )
+
+        st.write(
+            "Sum of dQi/dLMTDi: "
+            f"**{total_ua:,.4f} kW/K**"
         )
 
         st.dataframe(
-            segment_results,
+            segment_rows,
             use_container_width=True,
             hide_index=True,
-            column_config={
-                "Hot T1 [°C]": st.column_config.NumberColumn(
-                    format="%.4f"
-                ),
-                "Cold T1 [°C]": st.column_config.NumberColumn(
-                    format="%.4f"
-                ),
-                "ΔT1 [K]": st.column_config.NumberColumn(
-                    format="%.4f"
-                ),
-                "Hot T2 [°C]": st.column_config.NumberColumn(
-                    format="%.4f"
-                ),
-                "Cold T2 [°C]": st.column_config.NumberColumn(
-                    format="%.4f"
-                ),
-                "ΔT2 [K]": st.column_config.NumberColumn(
-                    format="%.4f"
-                ),
-                "dLMTD [K]": st.column_config.NumberColumn(
-                    format="%.4f"
-                ),
-                "dQi [kW]": st.column_config.NumberColumn(
-                    format="%.4f"
-                ),
-                "dQi/dLMTD [kW/K]":
-                    st.column_config.NumberColumn(
-                        format="%.4f"
-                    ),
-            },
         )
 
-        sum_dq_over_lmtd = sum(
-            row["dQi/dLMTD [kW/K]"]
-            for row in segment_results
+        st.latex(
+            r"""
+            WTD =
+            \frac{Q}
+            {\sum_{i=1}^{9}
+            \left(\frac{\Delta Q_i}{dLMTD_i}\right)}
+            """
         )
 
-        st.write(
-            "Sum of dQi/dLMTD: "
-            f"**{sum_dq_over_lmtd:,.5f} kW/K**"
-        )
+    with st.expander(
+        "Enthalpy details",
+        expanded=False,
+    ):
+        details_1, details_2 = st.columns(2)
 
-        st.write(
-            f"WTD: **{wtd:,.5f} K**"
-        )
+        with details_1:
+            st.markdown("### 🔴 Hot side")
+            st.write(
+                f"Inlet enthalpy: "
+                f"**{hot['h_in']:,.3f} kJ/kg**"
+            )
+            st.write(
+                f"Outlet enthalpy: "
+                f"**{hot['h_out']:,.3f} kJ/kg**"
+            )
+            st.write(
+                f"Mass flow: "
+                f"**{hot['flow_kg_s']:,.6f} kg/s**"
+            )
 
-        st.write(
-            f"ETD = {wtd:,.5f} × "
-            f"{geometry_factor:.5f} = "
-            f"**{etd:,.5f} K**"
-        )
-
-        st.write(
-            f"UA = {total_duty:,.5f} / "
-            f"{etd:,.5f} = "
-            f"**{required_ua:,.5f} kW/K**"
-        )
-
-    # ========================================================
-    # NATURAL-GAS DETAILS
-    # ========================================================
+        with details_2:
+            st.markdown("### 🔵 Cold side")
+            st.write(
+                f"Inlet enthalpy: "
+                f"**{cold['h_in']:,.3f} kJ/kg**"
+            )
+            st.write(
+                f"Outlet enthalpy: "
+                f"**{cold['h_out']:,.3f} kJ/kg**"
+            )
+            st.write(
+                f"Mass flow: "
+                f"**{cold['flow_kg_s']:,.6f} kg/s**"
+            )
 
     if (
         hot["fluid_name"] == "Typical natural gas"
         or cold["fluid_name"] == "Typical natural gas"
     ):
         with st.expander(
-            "Typical natural-gas composition",
-            expanded=False,
+            "Typical natural-gas composition"
         ):
             st.table(
                 {
@@ -1318,18 +1165,17 @@ try:
             )
 
             st.warning(
-                "This is a representative molar composition. "
-                "Use the actual gas analysis for project work."
+                "This is a representative composition. "
+                "Use the actual project gas composition "
+                "for project calculations."
             )
 
 except Exception as error:
-    st.error(
-        f"Calculation unavailable: {error}"
-    )
+    st.error(f"Calculation unavailable: {error}")
 
     st.info(
-        "Check the fluid states, absolute pressures, temperature "
-        "approaches, and CoolProp validity range."
+        "Check the fluid state, absolute pressures, temperatures, "
+        "flow rates and possible temperature crossing."
     )
 
 
@@ -1340,6 +1186,6 @@ except Exception as error:
 st.divider()
 
 st.caption(
-    "Calculation basis: Q = ṁΔh · 9 equal-duty segments · "
-    "WTD = Q / Σ(dQi/dLMTDi) · ETD = WTD × F · UA = Q/ETD"
+    "WTD uses nine equal-duty intervals. "
+    "UA shown here is Q/WTD."
 )
